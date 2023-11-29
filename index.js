@@ -11,14 +11,13 @@ const mg = mailgun({
   domain: DOMAIN,
 });
 
-
-const gcpCredentials =  JSON.parse(Buffer.from(process.env.GCP_PRIVATE_KEY, 'base64').toString('utf-8'));
+const gcpCredentials = JSON.parse(Buffer.from(process.env.GCP_PRIVATE_KEY, 'base64').toString('utf-8'));
 const storage = new Storage({
   projectId: gcpCredentials.project_id,
   credentials: gcpCredentials,
 });
 
-console.log(gcpCredentials)
+console.log(gcpCredentials);
 
 function generateTimestamp() {
   const now = new Date();
@@ -31,77 +30,77 @@ function padZero(value) {
 }
 
 const dynamoDBTableName = "Csye6225_Demo_DynamoDB";
-const bucketName = process.env.GCS_BUCKET_NAME
+const bucketName = process.env.GCS_BUCKET_NAME;
 const dynamoDB = new AWS.DynamoDB.DocumentClient();
 
 exports.handler = async function handler(event) {
+  let fileName;
   try {
-    // console.log(gcpCredentials);
     console.log("EVENT SNS", event.Records[0].Sns);
     console.log("EVENT", event);
     const timestamp = generateTimestamp();
-
     const eventData = JSON.parse(event.Records[0].Sns.Message);
-    console.log(eventData)
-
+    console.log(eventData);
     const releaseUrl = eventData.submission_url;
     const recipientEmail = eventData.email;
     const assignmentId = eventData.assignmentId;
-    
 
     console.log("URL:", releaseUrl);
     console.log("EMAIL:", recipientEmail);
-    console.log("Assignment ID : ",assignmentId);
+    console.log("Assignment ID : ", assignmentId);
 
     const response = await fetch(releaseUrl);
-    console.log('response',response)
-    if (!response.ok){
-      console.log("Download Failed Fetch")
+
+    console.log('response', response);
+
+    if (!response.ok) {
+      console.log("Download Failed Fetch");
       throw new Error(`Failed to download release: ${response.statusText}`);
     }
-    // Convert the response body to a Buffer
     const fileContents = await response.buffer();
+    fileName = `${recipientEmail}/${assignmentId}/submision_${timestamp}.zip`;
 
-    // Upload to Google Cloud Storage
-    const fileName = `${recipientEmail}/${assignmentId}/submision_${timestamp}.zip`;
-    
-    // Set a suitable file name
     await uploadToGCS(fileContents, fileName);
 
-    // Send email
-    await sendEmail(
-      recipientEmail,
-      "Download successful",
-      `The release was successfully downloaded and uploaded to Bucket`
-    );
+    // Generate signed URL for the object
+    const objectUrl = `https://storage.googleapis.com/${bucketName}/${fileName}`;
+    const signedUrl = await generateSignedUrl(bucketName, fileName, { expiresIn: 3600 });
 
-    // Track email in DynamoDB
+    await sendSuccessEmail(
+      recipientEmail,
+      "Download Successful",
+      "The release was successfully downloaded and uploaded to the Bucket.",
+      objectUrl,
+      signedUrl
+    );
     await trackEmail(recipientEmail, "Download successful");
   } catch (error) {
+    fileName = fileName || "unknownFileName.zip"
+    const eventData = JSON.parse(event.Records[0].Sns.Message);
     console.error("Error:", error);
+    const recipientEmail = eventData.email;
 
     // Send error email
-    await sendEmail(
-      event.email,
-      "Download failed",
-      `Error occurred: ${error.message}`
+    await sendFailureEmail(
+      recipientEmail,
+      "Download Failed",
+      `The release was not downloaded. Error: ${error.message}`,
+      fileName
     );
-
     // Track error email in DynamoDB
-    await trackEmail(event.email, "Download failed");
+    await trackEmail(recipientEmail, "Download failed");
   }
+  
 };
 
-// Upload Submission 
+// Upload Submission
 async function uploadToGCS(fileContents, fileName) {
-  console.log("This is the bucket name : ", bucketName)
+  console.log("This is the bucket name : ", bucketName);
   const bucket = storage.bucket(bucketName);
-  console.log("The file name is fileName: ",fileName)
+  console.log("The file name is fileName: ", fileName);
   const file = bucket.file(fileName);
-
   return new Promise((resolve, reject) => {
     const writeStream = file.createWriteStream();
-
     writeStream
       .on("error", reject)
       .on("finish", () => resolve(fileContents))
@@ -110,15 +109,39 @@ async function uploadToGCS(fileContents, fileName) {
 }
 
 // Mail Gun
-async function sendEmail(to, subject, message) {
+async function sendSuccessEmail(to, subject, message, objectUrl, signedUrl) {
   const data = {
     from: "csye6225@demo.pranavkulkarni.me",
-    to: "pranavkulkarni1024@gmail.com", // Use 'to' parameter, not hardcoded email
+    to: to,
     subject: subject,
-    text: message,
+    text: `${message}\n\nDownload the release from the following URL:\n${objectUrl}\n\nSigned URL for direct access:\n${signedUrl}`,
   };
 
   await mg.messages().send(data);
+}
+
+async function sendFailureEmail(to, subject, message, fileName) {
+  const data = {
+    from: "csye6225@demo.pranavkulkarni.me",
+    to: to,
+    subject: subject,
+    text: `${message}`,
+  };
+
+  await mg.messages().send(data);
+}
+
+// Function to generate a signed URL
+async function generateSignedUrl(bucketName, fileName, options = {}) {
+  const [url] = await storage
+    .bucket(bucketName)
+    .file(fileName)
+    .getSignedUrl({
+      action: "read",
+      expires: Date.now() + options.expiresIn * 1000, // Convert expiresIn from seconds to milliseconds
+    });
+
+  return url;
 }
 
 // DynamoDB
@@ -126,9 +149,10 @@ async function trackEmail(recipientEmail, status) {
   const params = {
     TableName: dynamoDBTableName,
     Item: {
-      email: recipientEmail,
+      id: Date.now().toString(),
       status: status,
       timestamp: new Date().toISOString(),
+      email: recipientEmail,
     },
   };
 
