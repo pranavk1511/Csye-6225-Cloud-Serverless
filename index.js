@@ -7,7 +7,7 @@ require('dotenv').config();
 
 const DOMAIN = "demo.pranavkulkarni.me";
 const mg = mailgun({
-  apiKey: "8f70a0f8526ee4d091938fa18ea9398f-5d2b1caa-f761dede",
+  apiKey: process.env.MAIL_GUN_API_KEY,
   domain: DOMAIN,
 });
 
