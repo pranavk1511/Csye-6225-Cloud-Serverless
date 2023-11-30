@@ -60,6 +60,9 @@ exports.handler = async function handler(event) {
     const fileContents = await response.buffer();
     fileName = `${recipientEmail}/${assignmentId}/submision_${timestamp}.zip`;
 
+    // Update DynamoDB status to "Email Sending"
+    await trackEmail(recipientEmail, "Email Sending");
+
     await uploadToGCS(fileContents, fileName);
 
     // Generate signed URL for the object
@@ -73,7 +76,8 @@ exports.handler = async function handler(event) {
       objectUrl,
       signedUrl
     );
-    await trackEmail(recipientEmail, "Download successful");
+    // Update DynamoDB status to "Download Successful Email Sent"
+    await trackEmail(recipientEmail, "Download Successful Email Sent");
   } catch (error) {
     fileName = fileName || "unknownFileName.zip"
     const eventData = JSON.parse(event.Records[0].Sns.Message);
@@ -87,10 +91,9 @@ exports.handler = async function handler(event) {
       `The release was not downloaded. Error: ${error.message}`,
       fileName
     );
-    // Track error email in DynamoDB
-    await trackEmail(recipientEmail, "Download failed");
+    // Update DynamoDB status to "Download Failed Email Sent"
+    await trackEmail(recipientEmail, "Download Failed Email Sent");
   }
-  
 };
 
 // Upload Submission
@@ -110,14 +113,21 @@ async function uploadToGCS(fileContents, fileName) {
 
 // Mail Gun
 async function sendSuccessEmail(to, subject, message, objectUrl, signedUrl) {
-  const data = {
-    from: "csye6225@demo.pranavkulkarni.me",
-    to: to,
-    subject: subject,
-    text: `${message}\n\nDownload the release from the following URL:\n${objectUrl}\n\nSigned URL for direct access:\n${signedUrl}`,
-  };
+  try {
+    const data = {
+      from: "csye6225@demo.pranavkulkarni.me",
+      to: to,
+      subject: subject,
+      text: `${message}\n\nDownload the release from the following URL:\n${objectUrl}\n\nSigned URL for direct access:\n${signedUrl}`,
+    };
 
-  await mg.messages().send(data);
+    await mg.messages().send(data);
+  } catch (error) {
+    console.error("Error sending success email:", error);
+    // If there's an error sending the email, update DynamoDB status to "Email Sending Failed"
+    await trackEmail(to, "Email Sending Failed");
+    throw error; // Re-throw the error to maintain the original behavior
+  }
 }
 
 async function sendFailureEmail(to, subject, message, fileName) {
